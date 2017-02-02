@@ -1,0 +1,15 @@
+[Bb]in
+[Oo]bj
+[Tt]emp
+[Tt]mp
+[Dd]ebug
+[Rr]elease
+.vs
+.suo
+*.sdf
+*.user
+*.filters
+*.opendb
+*.o
+*.a
+*.so

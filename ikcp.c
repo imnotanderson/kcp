@@ -353,6 +353,9 @@ void ikcp_setoutput(ikcpcb *kcp, int (*output)(const char *buf, int len,
 //---------------------------------------------------------------------
 // user/upper level recv: returns size, returns below zero for EAGAIN
 //---------------------------------------------------------------------
+// 收取数据：system call(udp recv)->buffer->queue->data
+// 1、stream模式，一次只取一个segment
+// 2、包模式，一次取尽量多的数据（将 frg 5,4,3,2,1,0系列数据都取出）
 int ikcp_recv(ikcpcb *kcp, char *buffer, int len)
 {
 	struct IQUEUEHEAD *p;
@@ -375,6 +378,7 @@ int ikcp_recv(ikcpcb *kcp, char *buffer, int len)
 	if (peeksize > len) 
 		return -3;
 
+	// 如果当前的 recv_queue 尺寸大于等于接收窗口大小，则启动快速恢复模式
 	if (kcp->nrcv_que >= kcp->rcv_wnd)
 		recover = 1;
 
@@ -399,6 +403,7 @@ int ikcp_recv(ikcpcb *kcp, char *buffer, int len)
 		if (ispeek == 0) {
 			iqueue_del(&seg->node);
 			ikcp_segment_delete(kcp, seg);
+			// 从 recv_queue 中取出数据给用户后，接收队列大小减1
 			kcp->nrcv_que--;
 		}
 
@@ -409,6 +414,12 @@ int ikcp_recv(ikcpcb *kcp, char *buffer, int len)
 	assert(len == peeksize);
 
 	// move available data from rcv_buf -> rcv_queue
+	// 将 rcv_buf 中的数据挪到 rcv_queue 中
+	// segment 从 rcv_buf 的头部移动到 rcv_queue 的尾部
+	// nrcv_que加1，nrcv_buf减1,rcv_nxt加1
+	//
+	// 如果 rcv_buf 中的 segment 的 sn 和 rcv_nxt 一致且 rcv_queue 的大小没有超过本地窗口大小，
+	// 则从buf中取出放入queue，否则数据将缓存到 buf 中
 	while (! iqueue_is_empty(&kcp->rcv_buf)) {
 		IKCPSEG *seg = iqueue_entry(kcp->rcv_buf.next, IKCPSEG, node);
 		if (seg->sn == kcp->rcv_nxt && kcp->nrcv_que < kcp->rcv_wnd) {
@@ -423,6 +434,8 @@ int ikcp_recv(ikcpcb *kcp, char *buffer, int len)
 	}
 
 	// fast recover
+	// 如果启动了快速恢复模式，并且当前的接收队列尺寸小于窗口大小，
+	// 则需要告诉对方我的窗口大小
 	if (kcp->nrcv_que < kcp->rcv_wnd && recover) {
 		// ready to send back IKCP_CMD_WINS in ikcp_flush
 		// tell remote my window size
@@ -436,6 +449,10 @@ int ikcp_recv(ikcpcb *kcp, char *buffer, int len)
 //---------------------------------------------------------------------
 // peek data size
 //---------------------------------------------------------------------
+// 计算用户可以通过recv获取多少数据，从recv_queue中计算
+// 计算方法：
+// 1、stream传输模式，则每次都只取rcv_queue头部的一个segment
+// 2、包模式，从 rcv_queue 的头部开始，依次读取 frg 为 5,4,3,2,1直到0的这些 segment 并计算他们的大小之和
 int ikcp_peeksize(const ikcpcb *kcp)
 {
 	struct IQUEUEHEAD *p;
@@ -464,6 +481,9 @@ int ikcp_peeksize(const ikcpcb *kcp)
 //---------------------------------------------------------------------
 // user/upper level send, returns below zero for error
 //---------------------------------------------------------------------
+
+// 发送数据：data->queue->buffer->system call (udp send)
+// snd_queue 是一个循环双向链表，发送数据时，数据被分成若干mss大小的segment并被放入 snd_queue “尾端”
 int ikcp_send(ikcpcb *kcp, const char *buffer, int len)
 {
 	IKCPSEG *seg;
@@ -472,7 +492,8 @@ int ikcp_send(ikcpcb *kcp, const char *buffer, int len)
 	assert(kcp->mss > 0);
 	if (len < 0) return -1;
 
-	// append to previous segment in streaming mode (if possible)
+	// 如果是流式传输模式，则会在 snd_queue 的尾巴判断这个 segment 是否满尺寸了，如果没有满，则填满。
+	// 被填满的这个 segment frg 为 0
 	if (kcp->stream != 0) {
 		if (!iqueue_is_empty(&kcp->snd_queue)) {
 			IKCPSEG *old = iqueue_entry(kcp->snd_queue.prev, IKCPSEG, node);
@@ -502,9 +523,11 @@ int ikcp_send(ikcpcb *kcp, const char *buffer, int len)
 		}
 	}
 
+	// 接下来，把剩余数据（长度为len）按照 mss 大小一个，分成 count 个
 	if (len <= (int)kcp->mss) count = 1;
 	else count = (len + kcp->mss - 1) / kcp->mss;
 
+	// 一次性发送的 segment 不能超过 255 个
 	if (count > 255) return -2;
 
 	if (count == 0) count = 1;
@@ -521,8 +544,11 @@ int ikcp_send(ikcpcb *kcp, const char *buffer, int len)
 			memcpy(seg->data, buffer, size);
 		}
 		seg->len = size;
+		// 如果是流模式，则 frg 为 0
+		// 如果是包模式，则 frg 为 5 4 3 2 1 0 这样
 		seg->frg = (kcp->stream == 0)? (count - i - 1) : 0;
 		iqueue_init(&seg->node);
+		// segment 被依次加入到 send_queue 的尾部
 		iqueue_add_tail(&seg->node, &kcp->snd_queue);
 		kcp->nsnd_que++;
 		if (buffer) {
@@ -538,6 +564,8 @@ int ikcp_send(ikcpcb *kcp, const char *buffer, int len)
 //---------------------------------------------------------------------
 // parse ack
 //---------------------------------------------------------------------
+// 按照输入的 rtt 更新 rto，rto 被限制在最大值和最小值之间
+// rto 用于接收 ack 的超时
 static void ikcp_update_ack(ikcpcb *kcp, IINT32 rtt)
 {
 	IINT32 rto = 0;
@@ -555,6 +583,11 @@ static void ikcp_update_ack(ikcpcb *kcp, IINT32 rtt)
 	kcp->rx_rto = _ibound_(kcp->rx_minrto, rto, IKCP_RTO_MAX);
 }
 
+// 缩小 snd_buf，增加 snd_una，相当于窗口左边沿右移
+// 如果 send_buf 中还有数据，则 snd_una 变为 snd_buf 首部数据的序列号
+// 否则 una = nxt（没有数据等待 ack）
+// 言外之意：
+// send_buf 中的所有的数据都是未确认的
 static void ikcp_shrink_buf(ikcpcb *kcp)
 {
 	struct IQUEUEHEAD *p = kcp->snd_buf.next;
@@ -566,10 +599,15 @@ static void ikcp_shrink_buf(ikcpcb *kcp)
 	}
 }
 
+// 处理收到的数据，从 snd_buf 中删掉已经确认的数据
+// snd_buf 中留下的数据都是未确认的，snd_buf 首部的数据就是 una
+// 这个序列号是 snd_buf 中最小的一个
 static void ikcp_parse_ack(ikcpcb *kcp, IUINT32 sn)
 {
 	struct IQUEUEHEAD *p, *next;
 
+	// 如果收到重复数据（序号比 una 还小）或者收到还没有发的数据（序列号比 nxt 还大，这个理论上不可能，除非程序写错了）
+	// 则不作处理
 	if (_itimediff(sn, kcp->snd_una) < 0 || _itimediff(sn, kcp->snd_nxt) >= 0)
 		return;
 
@@ -582,6 +620,8 @@ static void ikcp_parse_ack(ikcpcb *kcp, IUINT32 sn)
 			kcp->nsnd_buf--;
 			break;
 		}
+		// send_buf 中的数据从首部开始往后序列号是越来越大的
+		// 如果收到的数据序列号比 send_buf 中某个小，则后面的肯定不用考虑了
 		if (_itimediff(sn, seg->sn) < 0) {
 			break;
 		}
@@ -627,6 +667,8 @@ static void ikcp_parse_fastack(ikcpcb *kcp, IUINT32 sn)
 //---------------------------------------------------------------------
 // ack append
 //---------------------------------------------------------------------
+// 在本kcp连接中保存一个数据的序列号和时间戳
+// acklist 中依次保存了 ackcount 个(sn, ts)
 static void ikcp_ack_push(ikcpcb *kcp, IUINT32 sn, IUINT32 ts)
 {
 	size_t newsize = kcp->ackcount + 1;
@@ -663,6 +705,7 @@ static void ikcp_ack_push(ikcpcb *kcp, IUINT32 sn, IUINT32 ts)
 	kcp->ackcount++;
 }
 
+// 取出位于 p 的序列号和时间戳
 static void ikcp_ack_get(const ikcpcb *kcp, int p, IUINT32 *sn, IUINT32 *ts)
 {
 	if (sn) sn[0] = kcp->acklist[p * 2 + 0];
@@ -673,30 +716,37 @@ static void ikcp_ack_get(const ikcpcb *kcp, int p, IUINT32 *sn, IUINT32 *ts)
 //---------------------------------------------------------------------
 // parse data
 //---------------------------------------------------------------------
+// 将系统底层发来的数据存入 recv_buf 的尾部
+// 并且将 recv_buf 中的部分连续数据挪动到 recv_queue 中
 void ikcp_parse_data(ikcpcb *kcp, IKCPSEG *newseg)
 {
 	struct IQUEUEHEAD *p, *prev;
 	IUINT32 sn = newseg->sn;
 	int repeat = 0;
 	
+	// 销毁无效数据
 	if (_itimediff(sn, kcp->rcv_nxt + kcp->rcv_wnd) >= 0 ||
 		_itimediff(sn, kcp->rcv_nxt) < 0) {
 		ikcp_segment_delete(kcp, newseg);
 		return;
 	}
-
+	// 新数据插入 recv_buf 尾部
+	// 正常情况下，新数据的序列号要比 recv_buf 尾部数据的序列号大
 	for (p = kcp->rcv_buf.prev; p != &kcp->rcv_buf; p = prev) {
 		IKCPSEG *seg = iqueue_entry(p, IKCPSEG, node);
 		prev = p->prev;
+		// 检测重复数据
 		if (seg->sn == sn) {
 			repeat = 1;
 			break;
 		}
+		// 这是一般情况
 		if (_itimediff(sn, seg->sn) > 0) {
 			break;
 		}
 	}
-
+	// 如果没有重复数据，则把新数据加入 recv_buf
+	// 新数据会按序列号的大小顺序插入
 	if (repeat == 0) {
 		iqueue_init(&newseg->node);
 		iqueue_add(&newseg->node, p);
@@ -711,6 +761,9 @@ void ikcp_parse_data(ikcpcb *kcp, IKCPSEG *newseg)
 #endif
 
 	// move available data from rcv_buf -> rcv_queue
+	// 将数据从 rcv_buf 挪到 rcv_queue
+	// 数据将从 rcv_buf 首部开始挪动，挪动的一系列数据是连续的
+	// 挪动的数据依次放入 rcv_queue 尾部
 	while (! iqueue_is_empty(&kcp->rcv_buf)) {
 		IKCPSEG *seg = iqueue_entry(kcp->rcv_buf.next, IKCPSEG, node);
 		if (seg->sn == kcp->rcv_nxt && kcp->nrcv_que < kcp->rcv_wnd) {
@@ -739,6 +792,9 @@ void ikcp_parse_data(ikcpcb *kcp, IKCPSEG *newseg)
 //---------------------------------------------------------------------
 // input data
 //---------------------------------------------------------------------
+// system call(udp recv)->recv_buf->recv_queue->data
+// 接收系统底层收到的数据，处理后进入 recv_buf
+// 
 int ikcp_input(ikcpcb *kcp, const char *data, long size)
 {
 	IUINT32 una = kcp->snd_una;

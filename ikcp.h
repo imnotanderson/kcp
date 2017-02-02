@@ -256,18 +256,33 @@ typedef struct IQUEUEHEAD iqueue_head;
 struct IKCPSEG
 {
 	struct IQUEUEHEAD node;
+
+	// 会话号，每个kcp连接都有一个会话号
 	IUINT32 conv;
+	// 命令？
 	IUINT32 cmd;
+	// 如果kcp连接使用stream模式则frg为0
+	// 如果是包模式，则frg是5,4,3,2,1,0这种，frg为0表示最后一个包
 	IUINT32 frg;
+	// 窗口大小
 	IUINT32 wnd;
+	// 时间戳（timestamp）
 	IUINT32 ts;
+	// 序列号
 	IUINT32 sn;
+	// 发送方的未确认序列号？
 	IUINT32 una;
+	// 每个 segment 携带的数据大小，最大为 mss
 	IUINT32 len;
+	// ？
 	IUINT32 resendts;
+	// 发送数据到收到ack的超时
 	IUINT32 rto;
+	// ？
 	IUINT32 fastack;
+	// ？
 	IUINT32 xmit;
+	// 用户数据？
 	char data[1];
 };
 
