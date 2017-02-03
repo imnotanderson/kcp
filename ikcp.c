@@ -1063,7 +1063,7 @@ void ikcp_flush(ikcpcb *kcp)
 	cwnd = _imin_(kcp->snd_wnd, kcp->rmt_wnd);
 	if (kcp->nocwnd == 0) cwnd = _imin_(kcp->cwnd, cwnd);
 
-	// move data from snd_queue to snd_buf
+	// 将数据从 send_queue 放到 send_buf 中
 	// cwnd 为最终窗口大小，它是本地窗口、远端窗口的较小值
 	// 如果 kcp 连接设置了 nocwnd 为 0，则还要和 kcp->cwnd 做比较并取较小值
 	// cwnd 的大小决定了能发出的数据量
