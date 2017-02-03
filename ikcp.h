@@ -259,30 +259,35 @@ struct IKCPSEG
 
 	// 会话号，每个kcp连接都有一个会话号
 	IUINT32 conv;
-	// 命令？
+	// 命令，必须为一下4个之一：
+	// IKCP_CMD_PUSH = 81;		// cmd: push data
+	// IKCP_CMD_ACK  = 82;		// cmd: ack
+	// IKCP_CMD_WASK = 83;		// cmd: window probe (ask)
+	// IKCP_CMD_WINS = 84;		// cmd: window size (tell)
 	IUINT32 cmd;
 	// 如果kcp连接使用stream模式则frg为0
 	// 如果是包模式，则frg是5,4,3,2,1,0这种，frg为0表示最后一个包
 	IUINT32 frg;
-	// 窗口大小
+	// 发送方的可用窗口大小
 	IUINT32 wnd;
-	// 时间戳（timestamp）
+	// 发送方发送该segment时的时间戳（timestamp）
 	IUINT32 ts;
 	// 序列号
 	IUINT32 sn;
-	// 发送方的未确认序列号？
+	// 发送方的rcv_nxt
 	IUINT32 una;
 	// 每个 segment 携带的数据大小，最大为 mss
 	IUINT32 len;
-	// ？
+	// 该 segment 的重发超时时间戳（resend timestamp）
 	IUINT32 resendts;
 	// 发送数据到收到ack的超时
 	IUINT32 rto;
 	// ？
 	IUINT32 fastack;
-	// ？
+	// 只要这个 segment 被发送过一次，则 xmit 加 1
+	// 这个计数器用于包含用户数据的包
 	IUINT32 xmit;
-	// 用户数据？
+	// 用户数据
 	char data[1];
 };
 
