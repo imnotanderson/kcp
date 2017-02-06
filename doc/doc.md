@@ -27,6 +27,7 @@ TCP 是如何进行可靠的数据传输呢？前面已经说了，是通过 ARQ
 ![发送窗口](snd.png)
 
 接收窗口：
+
 ![接收窗口](rcv.png)
 
 [图片出处](http://www.tcpipguide.com/free/t_TCPSlidingWindowAcknowledgmentSystemForDataTranspo-6.htm)
