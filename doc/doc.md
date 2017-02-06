@@ -24,10 +24,10 @@ TCP 是如何进行可靠的数据传输呢？前面已经说了，是通过 ARQ
 
 发送窗口：
 
-[发送窗口](snd.png)
+![发送窗口](snd.png)
 
 接收窗口：
-[接收窗口](rcv.png)
+![接收窗口](rcv.png)
 
 [图片出处](http://www.tcpipguide.com/free/t_TCPSlidingWindowAcknowledgmentSystemForDataTranspo-6.htm)
 
@@ -65,4 +65,4 @@ TCP 是如何进行可靠的数据传输呢？前面已经说了，是通过 ARQ
 
 KCP 协议的实现中有四个缓冲区，每个缓冲区都是用的循环双向链表这种数据结构。具体的数据流向如下：
 
-[KCP 缓冲区](kcp_buffer.png)
+![KCP 缓冲区](kcp_buffer.png)
